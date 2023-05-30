@@ -59,16 +59,19 @@ def gotosleep(dummy,state):
   state['is_awake'] = False
 
 def he_control_loop(dummy,state):
+  print("he_control_loop execution ..")
   from time import sleep
   import RPi.GPIO as GPIO
   import config as conf
+  import sys
 
-  GPIO.setmode(GPIO.BCM)
+  GPIO.setmode(GPIO.BOARD)
+  GPIO.setwarnings(False)
   GPIO.setup(conf.he_pin, GPIO.OUT)
   GPIO.output(conf.he_pin,0)
 
   heating = False
-
+  sys.stderr = open("he_control_loop.err.log", "a", buffering=0)
   try:
     while True:
       avgpid = state['avgpid']
@@ -102,18 +105,17 @@ def pid_loop(dummy,state):
   import sys
   from time import sleep, time
   from math import isnan
-  import Adafruit_GPIO.SPI as SPI
-  import Adafruit_MAX31855.MAX31855 as MAX31855
+  from max31855 import MAX31855
+  import RPi.GPIO as GPIO
   import PID as PID
   import config as conf
-
   sys.stdout = open("pid.log", "a", buffering=0)
   sys.stderr = open("pid.err.log", "a", buffering=0)
 
   def c_to_f(c):
     return c * 9.0 / 5.0 + 32.0
 
-  sensor = MAX31855.MAX31855(spi=SPI.SpiDev(conf.spi_port, conf.spi_dev))
+  sensor = MAX31855(cs_pin=conf.CS,clock_pin=conf.CLK, data_pin=conf.DO, board=GPIO.BOARD)
 
   pid = PID.PID(conf.Pc,conf.Ic,conf.Dc)
   pid.SetPoint = state['settemp']
@@ -136,7 +138,7 @@ def pid_loop(dummy,state):
 
   try:
     while True : # Loops 10x/second
-      tempc = sensor.readTempC()
+      tempc = sensor.get_rj()
       if isnan(tempc) :
         nanct += 1
         if nanct > 100000 :
@@ -178,7 +180,8 @@ def pid_loop(dummy,state):
         avgpid = sum(pidhist)/len(pidhist)
 
       state['i'] = i
-      state['tempf'] = round(tempf,2)
+      state['tempf'] = round(tempf, 2)
+      state['tempC'] = round(tempc, 2)
       state['avgtemp'] = round(avgtemp,2)
       state['pidval'] = round(pidout,2)
       state['avgpid'] = round(avgpid,2)
@@ -203,15 +206,111 @@ def pid_loop(dummy,state):
   finally:
     pid.clear
 
+def f_to_c(f):
+  return ((f - 32) * 5.0/9.0)
+  
+def display_state_oled(dummy, state):
+  import time
+  import Adafruit_SSD1306
+  from datetime import datetime
+  from PIL import Image
+  from PIL import ImageDraw
+  from PIL import ImageFont
+  import subprocess
+  import sys
+
+  sys.stderr = open("display_oled.err.log", "a", buffering=0)
+  
+  # Raspberry Pi pin configuration:
+  RST = None     # on the PiOLED this pin isnt used
+  # Note the following are only used with SPI:
+  DC = 23
+  SPI_PORT = 0
+  SPI_DEVICE = 0
+  
+  # 128x64 display with hardware I2C:
+  disp = Adafruit_SSD1306.SSD1306_128_64(rst=RST)
+  
+  # Initialize library.
+  disp.begin()
+
+  # Clear display.
+  disp.clear()
+  disp.display()
+
+  # Create blank image for drawing.
+  # Make sure to create image with mode '1' for 1-bit color.
+  width = disp.width
+  height = disp.height
+  image = Image.new('1', (width, height))
+
+  # Get drawing object to draw on image.
+  draw = ImageDraw.Draw(image)
+
+  # Draw a black filled box to clear the image.
+  draw.rectangle((0,0,width,height), outline=0, fill=0)
+
+  # Draw some shapes.
+  # First define some constants to allow easy resizing of shapes.
+  padding = -2
+  top = padding
+  bottom = height-padding
+  # Move left to right keeping track of the current x position for drawing shapes.
+  x = 0
+
+
+  # Load default font.
+  font = ImageFont.load_default()
+
+  while True:
+
+      # Draw a black filled box to clear the image.
+      draw.rectangle((0,0,width,height), outline=0, fill=0)
+
+      # Shell scripts for system monitoring from here : https://unix.stackexchange.com/questions/119126/command-to-display-memory-usage-disk-usage-and-cpu-load
+      cmd = "hostname -I | cut -d\' \' -f1"
+      IP = subprocess.check_output(cmd, shell = True )
+      cmd = "top -bn1 | grep load | awk '{printf \"CPU Load: %.2f\", $(NF-2)}'"
+      CPU = subprocess.check_output(cmd, shell = True )
+      cmd = "free -m | awk 'NR==2{printf \"Mem: %s/%sMB %.2f%%\", $3,$2,$3*100/$2 }'"
+      MemUsage = subprocess.check_output(cmd, shell = True )
+      cmd = "df -h | awk '$NF==\"/\"{printf \"Disk: %d/%dGB %s\", $3,$2,$5}'"
+      Disk = subprocess.check_output(cmd, shell = True )
+
+      currentTempC = "Current temp: %s C" % state['tempC']
+      brewTemp = "Brew temp: %.2f C" % f_to_c(state['settemp'])
+      isHeating = "Heating state: %s" % state['heating']
+      
+      dt_string = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+
+      # Write two lines of text.
+      draw.text((x, top),       "IP: " + str(IP),  font=font, fill=255)
+      draw.text((x, top+8),     str(CPU), font=font, fill=255)
+      draw.text((x, top+16),    str(MemUsage),  font=font, fill=255)
+      draw.text((x, top+25),    str(Disk),  font=font, fill=255)
+      draw.text((x, top+32),    str(currentTempC),  font=font, fill=255)
+      draw.text((x, top+40),    str(brewTemp),  font=font, fill=255)
+      draw.text((x, top+48),    str(isHeating),  font=font, fill=255)
+      draw.text((x, top+56),    str(dt_string),  font=font, fill=255)
+
+      # Display image.
+      disp.image(image)
+      disp.display()
+      time.sleep(.1)
+
+
 def rest_server(dummy,state):
   from bottle import route, run, get, post, request, static_file, abort
   from subprocess import call
   from datetime import datetime
   import config as conf
   import os
+  import sys
 
   basedir = os.path.dirname(__file__)
   wwwdir = basedir+'/www/'
+  
+  sys.stderr = open("rest_server.err.log", "a", buffering=0)
 
   @route('/')
   def docroot():
@@ -225,6 +324,12 @@ def rest_server(dummy,state):
   def curtemp():
     return str(state['avgtemp'])
 
+  @route('/curtempC')
+  def curtempC():
+    return str(f_to_c(state['avgtemp']))
+  @route('/heatState')
+  def heatState():
+    return str(state['heating'])
   @get('/settemp')
   def settemp():
     return str(state['settemp'])
@@ -237,8 +342,10 @@ def rest_server(dummy,state):
         state['settemp'] = settemp
         return str(settemp)
       else:
+        print("Temp out of range 200-260")
         abort(400,'Set temp out of range 200-260.')
     except:
+      print('Invalid number for set temp.')
       abort(400,'Invalid number for set temp.')
 
   @get('/is_awake')
@@ -294,7 +401,7 @@ def rest_server(dummy,state):
   def healthcheck():
     return 'OK'
 
-  run(host='0.0.0.0',port=conf.port,server='cheroot')
+  run(host=conf.host,port=conf.port, server=conf.server)
 
 if __name__ == '__main__':
   from multiprocessing import Process, Manager
@@ -311,11 +418,15 @@ if __name__ == '__main__':
   pidstate['i'] = 0
   pidstate['settemp'] = conf.set_temp
   pidstate['avgpid'] = 0.
-
   print "Starting Scheduler thread..."
   s = Process(target=scheduler,args=(1,pidstate))
   s.daemon = True
   s.start()
+  
+  print "Starting display OLED..."
+  r = Process(target=display_state_oled,args=(1,pidstate))
+  r.daemon = True
+  r.start()
 
   print "Starting PID thread..."
   p = Process(target=pid_loop,args=(1,pidstate))

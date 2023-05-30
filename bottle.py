@@ -3291,6 +3291,7 @@ class CherootServer(ServerAdapter):
                     certfile, keyfile, chainfile)
         try:
             server.start()
+	    print("Here")
         finally:
             server.stop()
 
